@@ -1,6 +1,6 @@
 ---
 name: modelshow
-version: 1.0.1
+version: 1.1.0
 description: Blind multi-model comparison with architecturally guaranteed de-anonymization. Trigger with "mdls" or "modelshow" for double-blind evaluation of AI model responses.
 metadata: {"openclaw": {"homepage": "https://github.com/schbz/modelshow", "emoji": "🕶️"}}
 ---
@@ -22,6 +22,13 @@ ModelShow provides a sophisticated framework for comparing AI model responses th
 **Trigger**: Message starts with `mdls` or `modelshow` (case-insensitive). Extract the prompt by removing the trigger keyword.
 
 **Example**: `mdls explain quantum entanglement` → prompt = `explain quantum entanglement`
+
+**Per-run model override (optional)**: If the message begins with a bracketed,
+comma-separated alias list immediately after the trigger, use exactly those
+models for this run instead of `config.models`. Validate each alias against your
+instance's configured aliases and drop any that don't exist.
+
+**Example**: `mdls [grok,kimi,sonnet] explain quantum entanglement` → models = `["grok", "kimi", "sonnet"]`, prompt = `explain quantum entanglement`
 
 ## Workflow
 
@@ -90,19 +97,30 @@ collected_responses = {
 
 ### Step 4: Anonymize with Cryptographic Randomization
 
-Execute the anonymization pipeline:
+> 🔒 **NEVER pipe model/judge text through `echo '...'`.** Responses routinely
+> contain single quotes, backticks, `$`, and newlines that break the shell and
+> are an injection vector. **Always write the payload to a temp file and pass it
+> with `--file`** (or pipe a file on stdin). The script parses it as data only.
+
+Write the anonymization payload to a file, then run the pipeline:
 ```bash
-echo '{
+# Write {model: response_text} as JSON to a temp file (use your file-writing tool, not echo)
+python3 {baseDir}/judge_pipeline.py --file /tmp/mdls-anonymize.json
+```
+
+Payload shape (`/tmp/mdls-anonymize.json`):
+```json
+{
   "action": "anonymize",
-  "responses": {model: response_dict},
+  "responses": {"model_alias": "response text", "...": "..."},
   "label_style": "alphabetic",
   "shuffle": true
-}' | python3 {baseDir}/judge_pipeline.py
+}
 ```
 
 **Key Features**:
 - `shuffle: true` ensures cryptographically random response order
-- Labels are assigned as "Response A", "Response B", etc.
+- Labels are assigned as "Response A", "Response B", etc. (auto-switches to "Candidate N" when more than 26 models are compared)
 - `anonymization_map` tracks label-to-model mapping for later de-anonymization
 
 ### Step 5: Spawn Judge+Deanon Sub-Agent
@@ -121,24 +139,36 @@ PART 1: JUDGE THE RESPONSES
 
 [Blind responses with placeholder labels]
 
+Evaluate each response against these criteria: {config.judgeCriteria}.
+
 ═══════════════════════════════════════════════════════════
 PART 2: PROCESS YOUR JUDGMENT
 ═══════════════════════════════════════════════════════════
 
 1. Write your judgment evaluating Response A, Response B, etc.
-2. Include scores (1-10) for each response
+2. Include an overall score (1-10) for each response
 3. Provide an "Overall Assessment" section analyzing cross-model patterns
 
-After writing your judgment, run this command:
+Then build a finalize payload and write it to a temp file (do NOT use echo —
+the judgment text may contain quotes/newlines). The payload MUST include a
+structured "scores" object mapping each placeholder label to its overall score,
+so ranking never depends on parsing your prose:
 
-echo '{
+{
   "action": "finalize",
-  "judge_output": "[YOUR JUDGMENT TEXT HERE]",
-  "anonymization_map": {anonymization_map}
-}' | python3 {baseDir}/judge_pipeline.py
+  "judge_output": "[YOUR FULL JUDGMENT TEXT HERE]",
+  "anonymization_map": {anonymization_map},
+  "scores": {"Response A": 9.1, "Response B": 7.4}
+}
+
+Write that JSON to /tmp/mdls-finalize.json, then run:
+
+python3 {baseDir}/judge_pipeline.py --file /tmp/mdls-finalize.json
 
 Return ONLY the JSON output from that command.
 ```
+
+**Structured scores**: When `scores` is present, `judge_pipeline.py` ranks deterministically from it (`ranking_source: "structured"`) and falls back to prose regex only if it is missing (`ranking_source: "regex"`).
 
 **Judge Model**: Uses `config.judgeModel` (e.g. `sonnet`, `gemini31or`)
 
@@ -185,7 +215,8 @@ Judge's assessment: [Commentary]
 - JSON: `{config.outputDir}/{slug}-{timestamp}.json`
 - Markdown: `{config.outputDir}/{slug}-{timestamp}.md`
 
-**Exact JSON payload to pipe into `save_results.py`:**
+**Write the JSON payload to a temp file** (`/tmp/mdls-save.json`) — do NOT use
+`echo`, since response/judge text contains quotes and newlines:
 
 ```json
 {
@@ -193,12 +224,14 @@ Judge's assessment: [Commentary]
   "timestamp": "<ISO 8601 timestamp, e.g. 2026-03-08T01:00:00Z>",
   "models": ["model1", "model2", "model3"],
   "judge_model": "<config.judgeModel>",
+  "judge_criteria": ["accuracy", "clarity", "completeness", "usefulness"],
   "output_dir": "<config.outputDir>",
   "ranked_results": [
     {
       "rank": 1,
       "model": "model_alias",
       "score": 9.5,
+      "criteria_scores": {"accuracy": 9, "clarity": 10, "completeness": 9, "usefulness": 10},
       "judge_notes": "Judge's per-model commentary here",
       "response_text": "The full model response text here"
     },
@@ -224,9 +257,11 @@ Judge's assessment: [Commentary]
 }
 ```
 
+> `judge_criteria` and per-result `criteria_scores` are optional but recommended — they enrich the saved report.
+
 **Execute the save command:**
 ```bash
-echo '<JSON payload above>' | python3 {baseDir}/save_results.py
+python3 {baseDir}/save_results.py --file /tmp/mdls-save.json
 ```
 
 **Verify success**: The script MUST return `{"success": true, ...}`. If it returns an error, fix and retry. Do NOT proceed without a successful save.

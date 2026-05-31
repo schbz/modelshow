@@ -234,7 +234,7 @@ def main():
     existing_index = prune_old_files(web_dir, args.retention_days, args.max_entries, existing_index, args.verbose)
     
     index_data = {
-        'version': '1.0.1',
+        'version': '1.1.0',
         'last_updated': datetime.now().isoformat() + 'Z',
         'count': len(existing_index),
         'results': existing_index

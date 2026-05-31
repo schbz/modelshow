@@ -100,6 +100,15 @@ ModelShow uses a double-blind evaluation protocol — the judge never knows whic
 
 ---
 
+## What's New in v1.1.0
+
+- **Shell-injection hardening**: `judge_pipeline.py` and `save_results.py` accept `--file PATH` (and still read stdin), so payloads with model/judge text containing quotes, backticks, `$`, or newlines no longer break the command or inject shell — the workflow writes a temp file instead of `echo '{...}'`
+- **Deterministic ranking**: the judge emits a structured `scores` map and `finalize` ranks from it directly, only falling back to prose regex when absent
+- **>26 model guard**: anonymization auto-switches from alphabetic to numeric labels past 26 models
+- **Path-traversal safety**: `save_results.py` sanitizes the slug, resolves `output_dir`, and refuses to write outside it
+- **Per-criterion scores**: optional `judge_criteria` + per-result `criteria_scores` persisted to JSON/Markdown
+- **Per-run model override**: `mdls [grok,kimi,sonnet] <prompt>` compares just those models for one run
+
 ## What's New in v1.0.1
 
 - **Cryptographic shuffle**: `judge_pipeline.py` now uses `secrets.SystemRandom()` for truly random anonymization order — no positional bias possible
@@ -190,15 +199,20 @@ Utility module used by the pipeline for managing anonymization state.
 > The path below assumes a managed install (`~/.openclaw/skills/modelshow/`). If you installed via ClawHub into a workspace, substitute your actual skill path.
 
 ```bash
-# Phase 1: Anonymize
-echo '{"action":"anonymize","responses":{"sonnet":"Paris is the capital of France.","grok":"The capital of France is Paris, founded by the Parisii tribe."}}' | python3 ~/.openclaw/skills/modelshow/judge_pipeline.py
+# Phase 1: Anonymize — write the payload to a file, then pass --file (never echo untrusted text)
+printf '%s' '{"action":"anonymize","responses":{"sonnet":"Paris is the capital of France.","grok":"The capital of France is Paris, founded by the Parisii tribe."}}' > /tmp/anon.json
+python3 ~/.openclaw/skills/modelshow/judge_pipeline.py --file /tmp/anon.json
 
-# Phase 2: Finalize (use anonymization_map from Phase 1)
-echo '{
+# Phase 2: Finalize (use anonymization_map from Phase 1; include structured scores)
+cat > /tmp/finalize.json <<'JSON'
+{
   "action": "finalize",
   "judge_output": "1st: Response A — Score: 8.5/10\nClear and direct.\n\n2nd: Response B — Score: 7/10\nMore detailed but slightly verbose.",
-  "anonymization_map": {"Response A": "grok", "Response B": "sonnet"}
-}' | python3 ~/.openclaw/skills/modelshow/judge_pipeline.py
+  "anonymization_map": {"Response A": "grok", "Response B": "sonnet"},
+  "scores": {"Response A": 8.5, "Response B": 7.0}
+}
+JSON
+python3 ~/.openclaw/skills/modelshow/judge_pipeline.py --file /tmp/finalize.json
 ```
 
 Expected Phase 2 output:
@@ -209,6 +223,7 @@ Expected Phase 2 output:
     {"placeholder": "Response A", "model": "grok", "score": 8.5, "rank": 1},
     {"placeholder": "Response B", "model": "sonnet", "score": 7.0, "rank": 2}
   ],
+  "ranking_source": "structured",
   "deanonymization_complete": true,
   "remaining_placeholders": []
 }

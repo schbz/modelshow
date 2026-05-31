@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Save ModelShow results to both MD and JSON formats with full model names.
-Version: 1.0.1
+Version: 1.1.0
 """
 
 import sys
@@ -65,9 +65,16 @@ def resolve_model_name(alias):
     return alias
 
 def slugify(text, max_words=5):
-    """Convert text to slug: first N words, lowercased, hyphenated."""
+    """Convert text to a filesystem-safe slug: first N words, lowercased, hyphenated.
+
+    Strips everything except [a-z0-9-] so a crafted prompt can never inject path
+    separators (``/``, ``\\``) or traversal sequences (``..``) into the filename.
+    """
+    import re
     words = text.strip().split()[:max_words]
-    return '-'.join(w.lower().replace("'", "").replace('"', '') for w in words)
+    raw = '-'.join(words).lower()
+    slug = re.sub(r'[^a-z0-9]+', '-', raw).strip('-')
+    return slug or 'result'
 
 def format_timestamp(iso_string):
     """Convert ISO timestamp to YYYY-MM-DD-HHMM format."""
@@ -104,6 +111,11 @@ def save_markdown(data, output_path):
         full_name = resolve_model_name(result['model'])
         md.append(f"### {medal} **{full_name}** — {result['score']}/10")
         md.append("")
+        criteria_scores = result.get('criteria_scores') or {}
+        if criteria_scores:
+            parts = ', '.join(f"{k}: {v}" for k, v in criteria_scores.items())
+            md.append(f"**Criteria:** {parts}")
+            md.append("")
         md.append("**Judge's Assessment:**")
         md.append(result.get('judge_notes', '(No notes available)'))
         md.append("")
@@ -208,7 +220,8 @@ def save_json(data, output_path, slug=None, timestamp_str=None):
             "prompt": data['prompt'],
             "models_queried": [resolve_model_name(m) for m in data['models']],
             "judge_model": resolve_model_name(data['judge_model']),
-            "judging_mode": "blind"
+            "judging_mode": "blind",
+            "judge_criteria": data.get('judge_criteria', [])
         },
         "results": [
             {
@@ -216,6 +229,8 @@ def save_json(data, output_path, slug=None, timestamp_str=None):
                 "model": resolve_model_name(r['model']),
                 "model_alias": r['model'],  # Keep alias for reference
                 "score": r['score'],
+                # Optional per-criterion subscores, e.g. {"accuracy": 9, "clarity": 8}
+                "criteria_scores": r.get('criteria_scores', {}),
                 "response": r.get('response_text', ''),
                 "assessment": r.get('judge_notes', '')
             }
@@ -244,10 +259,25 @@ def save_json(data, output_path, slug=None, timestamp_str=None):
     
     return output_path
 
+def read_payload():
+    """Read the JSON payload from `--file PATH` if given, else from stdin.
+
+    Reading from a file/stdin (instead of an inline shell `echo '...'`) keeps
+    untrusted model/judge text off the command line — avoiding quote breakage
+    and shell-injection risk.
+    """
+    argv = sys.argv[1:]
+    if "--file" in argv:
+        idx = argv.index("--file")
+        if idx + 1 >= len(argv):
+            raise ValueError("--file requires a path argument")
+        with open(argv[idx + 1], "r", encoding="utf-8") as f:
+            return f.read()
+    return sys.stdin.read()
+
 def main():
     try:
-        # Read JSON from stdin
-        input_data = sys.stdin.read()
+        input_data = read_payload()
         data = json.loads(input_data)
         
         # Validate required fields
@@ -260,17 +290,27 @@ def main():
             }))
             sys.exit(1)
         
-        # Expand output directory (handle ~). Default from config; common: modelshow-results or modelshow-private.
-        output_dir = Path(data.get('output_dir', '~/.openclaw/workspace/modelshow-results')).expanduser()
+        # Expand + resolve output directory (handle ~ and relative paths).
+        # Default from config; common: modelshow-results or modelshow-private.
+        output_dir = Path(data.get('output_dir', '~/.openclaw/workspace/modelshow-results')).expanduser().resolve()
         output_dir.mkdir(parents=True, exist_ok=True)
         
-        # Generate filename
+        # Generate filename (slug is sanitized to [a-z0-9-] — no path traversal)
         slug = slugify(data['prompt'])
         timestamp_str = format_timestamp(data['timestamp'])
         base_name = f"{slug}-{timestamp_str}"
         
         md_path = output_dir / f"{base_name}.md"
         json_path = output_dir / f"{base_name}.json"
+        
+        # Defense in depth: ensure the resolved paths stay inside output_dir
+        for p in (md_path, json_path):
+            if output_dir not in p.resolve().parents:
+                print(json.dumps({
+                    "success": False,
+                    "error": "Refusing to write outside output_dir (path traversal blocked)"
+                }))
+                sys.exit(1)
         
         # Save both formats
         saved_md = save_markdown(data, md_path)
